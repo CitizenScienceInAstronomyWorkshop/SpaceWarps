@@ -111,6 +111,10 @@ def SWAP(argv):
     else:
         print "SWAP: data will be read from the current live Mongo database"
     
+    stage = str(int(tonights.parameters['stage']))
+    survey = tonights.parameters['survey']
+    print "SWAP: looks like we are on Stage "+stage+" of the ",survey," survey project"
+
     agents_willing_to_learn = tonights.parameters['agents_willing_to_learn']
     if agents_willing_to_learn:
         a_few_at_the_start = tonights.parameters['a_few_at_the_start']
@@ -197,25 +201,43 @@ def SWAP(argv):
     # start time:
 
     batch = db.find('since',t1)
-        
+    
     # Actually, batch is a cursor, now set to the first classification 
-    # after time t1.
+    # after time t1. Maybe this could be a Kafka cursor instead? And then
+    # all of this could be in an infinite loop? Hmm - we'd still want to 
+    # produce some output periodically - but this should be done by querying
+    # the bureau and sample databases, separately from SWAP. 
     
     # ------------------------------------------------------------------
     
-    count_max = 50000
+    count_max = 5000000
     print "SWAP: interpreting up to",count_max," classifications..."
-    if one_by_one: print "SWAP: (one by one - hit return for the next one)"
+    if one_by_one: print "SWAP: ...one by one - hit return for the next one..."
 
     count = 0
     for classification in batch:
-
+        
+        if one_by_one: next = raw_input()
+        
         # Get the vitals for this classification:
-        items = db.digest(classification,method=use_marker_positions)
+        items = db.digest(classification,survey,method=use_marker_positions)
+        if vb: print "#"+str(count+1)+". items = ",items
         if items is None: 
-            continue # Tutorial subjects fail!
-        t,Name,ID,ZooID,category,kind,X,Y,location = items
+            continue # Tutorial subjects fail, as do stage/project mismatches!
+        t,Name,ID,ZooID,category,kind,X,Y,location,thisstage = items
 
+        # If the stage of this classification does not match the stage we are
+        # on, skip to the next one!
+        if thisstage != stage: 
+            if vb:
+                print "Found classification from different stage: ",thisstage," cf. ",stage,", items = ",items
+                print " "
+            continue
+        else:
+            if vb:
+                print "Found classification from this stage: ",items
+                print " "
+            
         # Register new volunteers, and create an agent for each one:
         # Old, slow code: if Name not in bureau.list():  
         try: test = bureau.member[Name]
@@ -237,11 +259,16 @@ def SWAP(argv):
         elif category == 'training':
             bureau.member[Name].heard(it_was=X,actually_it_was=Y,ignore=True)
 
+        # If the bureau and the sample were being stored as Mongo databases,
+        # we would want to update those DBs here, with bureau.save or 
+        # agent.save...
+
+
         # Brag about it:
         count += 1
         if vb:
             print swap.dashedline
-            print "SWAP: Subject "+ID+" was classified by "+Name
+            print "SWAP: Subject "+ID+" was classified by "+Name+" during Stage ",stage
             print "SWAP: he/she said "+X+" when it was actually "+Y
             print "SWAP: their agent reckons their contribution (in bits) = ",bureau.member[Name].contribution
             print "SWAP: while estimating their PL,PD as ",bureau.member[Name].PL,bureau.member[Name].PD
@@ -263,8 +290,6 @@ def SWAP(argv):
         elif count == count_max: 
             break
     
-        if one_by_one: next = raw_input()
-    
     sys.stdout.write('\n')
     if vb: print swap.dashedline
     print "SWAP: total no. of classifications processed: ",count
@@ -278,7 +303,7 @@ def SWAP(argv):
     else:
         more_to_do = True
         
-        
+            
     # ------------------------------------------------------------------
     
     # Set up outputs based on where we got to.
@@ -358,6 +383,27 @@ def SWAP(argv):
         N = swap.write_list(sample,new_samplefile,item='false_negative')
         print "SWAP: "+str(N)+" lines written to "+new_samplefile
 
+        # Also write out catalogs of subjects, including the ZooID, subject ID,
+        # how many classifications, and probability:
+
+        catalog = swap.get_new_filename(tonights.parameters,'candidate_catalog')
+        print "SWAP: saving catalog of high probability subjects..."
+        Nlenses,Nsubjects = swap.write_catalog(sample,catalog,thresholds,kind='test')
+        print "SWAP: From "+str(Nsubjects)+" subjects classified,"
+        print "SWAP: "+str(Nlenses)+" candidates (with P > rejection) written to "+catalog
+
+        catalog = swap.get_new_filename(tonights.parameters,'sim_catalog')
+        print "SWAP: saving catalog of high probability subjects..."
+        Nsims,Nsubjects = swap.write_catalog(sample,catalog,thresholds,kind='sim')
+        print "SWAP: From "+str(Nsubjects)+" subjects classified,"
+        print "SWAP: "+str(Nsims)+" sim 'candidates' (with P > rejection) written to "+catalog
+
+        catalog = swap.get_new_filename(tonights.parameters,'dud_catalog')
+        print "SWAP: saving catalog of high probability subjects..."
+        Nduds,Nsubjects = swap.write_catalog(sample,catalog,thresholds,kind='dud')
+        print "SWAP: From "+str(Nsubjects)+" subjects classified,"
+        print "SWAP: "+str(Nduds)+" dud 'candidates' (with P > rejection) written to "+catalog
+
 
     # ------------------------------------------------------------------
     # Now, if there is more to do, over-write the update.config file so
@@ -400,28 +446,57 @@ def SWAP(argv):
         bureau.plot_probabilities(Nc,t,pngfile)        
         tonights.parameters['probabilitiesplot'] = pngfile
 
-        # Subject probabilities:
+        # Subject trajectories:
 
         fig3 = sample.start_trajectory_plot()
         pngfile = swap.get_new_filename(tonights.parameters,'trajectories')
+        
+        # Random 500  for display purposes:
         Ns = np.min([500,sample.size()])
         print "SWAP: plotting "+str(Ns)+" subject trajectories in "+pngfile
 
         for ID in sample.shortlist(Ns):
             sample.member[ID].plot_trajectory(fig3)
 
-        # These are false negatives and true positives
-        for ID in sample.shortlist(15,kind='sim',status='rejected'):
-            sample.member[ID].plot_trajectory(fig3)
-        for ID in sample.shortlist(15,kind='sim',status='detected'):
-            sample.member[ID].plot_trajectory(fig3)
-
-        # Aprajita's false negative only plot:
+        # To plot only false negatives, or only true positives:
         # for ID in sample.shortlist(Ns,kind='sim',status='rejected'):
         #     sample.member[ID].plot_trajectory(fig3)
-
-        sample.finish_trajectory_plot(fig3,t,pngfile)
+        # for ID in sample.shortlist(Ns,kind='sim',status='detected'):
+        #     sample.member[ID].plot_trajectory(fig3)
+        
+        sample.finish_trajectory_plot(fig3,pngfile,t=t)
         tonights.parameters['trajectoriesplot'] = pngfile
+
+        # Candidates! Plot all undecideds or detections:
+
+        fig4 = sample.start_trajectory_plot(final=True)
+        pngfile = swap.get_new_filename(tonights.parameters,'sample')
+        
+        # BigN = 100000 # Would get them all...
+        BigN = 500      # Can't see them all!
+        candidates = []
+        candidates += sample.shortlist(BigN,kind='test',status='detected')
+        candidates += sample.shortlist(BigN,kind='test',status='undecided')
+        sims = []
+        sims += sample.shortlist(BigN,kind='sim',status='detected')
+        sims += sample.shortlist(BigN,kind='sim',status='undecided')
+        duds = []
+        duds += sample.shortlist(BigN,kind='dud',status='detected')
+        duds += sample.shortlist(BigN,kind='dud',status='undecided')
+
+        print "SWAP: plotting "+str(len(sims))+" sims in "+pngfile
+        for ID in sims:
+            sample.member[ID].plot_trajectory(fig4)
+        print "SWAP: plotting "+str(len(duds))+" duds in "+pngfile
+        for ID in duds:
+            sample.member[ID].plot_trajectory(fig4)
+        print "SWAP: plotting "+str(len(candidates))+" candidates in "+pngfile
+        for ID in candidates:
+            sample.member[ID].plot_trajectory(fig4)
+
+        # They will all show up in the histogram though:
+        sample.finish_trajectory_plot(fig4,pngfile,final=True)
+        tonights.parameters['candidatesplot'] = pngfile
 
         # ------------------------------------------------------------------
         # Finally, write a PDF report:
